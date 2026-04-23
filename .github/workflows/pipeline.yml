@@ -1,0 +1,303 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint Python - API
+        run: flake8 api/main.py --max-line-length=100
+
+      - name: Lint Python - Worker
+        run: flake8 worker/worker.py --max-line-length=100
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install ESLint
+        run: |
+          cd frontend
+          npm install
+          npx eslint --version
+
+      - name: Lint JavaScript
+        run: |
+          cd frontend
+          npx eslint app.js --env node --env es2021 \
+            --rule '{"no-unused-vars": "warn", "no-console": "off"}' \
+            --parser-options "ecmaVersion:2021"
+
+      - name: Install Hadolint
+        run: |
+          wget -qO /usr/local/bin/hadolint \
+            https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          chmod +x /usr/local/bin/hadolint
+
+      - name: Lint Dockerfiles
+        run: |
+          hadolint api/Dockerfile
+          hadolint worker/Dockerfile
+          hadolint frontend/Dockerfile
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install fastapi uvicorn redis pytest pytest-cov httpx
+
+      - name: Run API unit tests
+        run: |
+          pytest api/tests/ -v --cov=api --cov-report=xml --cov-report=term
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          push: true
+          tags: |
+            localhost:5000/api:latest
+            localhost:5000/api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./worker
+          push: true
+          tags: |
+            localhost:5000/worker:latest
+            localhost:5000/worker:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            localhost:5000/frontend:latest
+            localhost:5000/frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Rebuild images for scanning
+        run: |
+          docker build -t localhost:5000/api:latest ./api
+          docker build -t localhost:5000/worker:latest ./worker
+          docker build -t localhost:5000/frontend:latest ./frontend
+
+      - name: Install Trivy
+        run: |
+          wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan API image
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format sarif \
+            --output trivy-api.sarif \
+            localhost:5000/api:latest
+
+      - name: Scan Worker image
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format sarif \
+            --output trivy-worker.sarif \
+            localhost:5000/worker:latest
+
+      - name: Scan Frontend image
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format sarif \
+            --output trivy-frontend.sarif \
+            localhost:5000/frontend:latest
+
+      - name: Upload Trivy SARIF results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-results
+          path: "*.sarif"
+
+  integration:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: security
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env file
+        run: |
+          cat > .env <<EOL
+          REDIS_PASSWORD=testpassword123
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          API_URL=http://api:8000
+          APP_ENV=test
+          EOL
+
+      - name: Start full stack
+        run: docker compose up --build -d
+
+      - name: Wait for all services to be healthy
+        run: |
+          echo "Waiting for services..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Stack is up!"
+              break
+            fi
+            echo "Attempt $i/30 - waiting..."
+            sleep 5
+          done
+
+      - name: Submit a job
+        run: |
+          RESPONSE=$(curl -sf -X POST http://localhost:3000/submit)
+          echo "Response: $RESPONSE"
+          JOB_ID=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+          echo "Job ID: $JOB_ID"
+
+      - name: Poll until job completes
+        run: |
+          for i in $(seq 1 20); do
+            STATUS=$(curl -sf http://localhost:3000/status/${{ env.JOB_ID }} | \
+              python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))")
+            echo "Attempt $i - Status: $STATUS"
+            if [ "$STATUS" = "completed" ]; then
+              echo "Job completed successfully!"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Job did not complete in time"
+          exit 1
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: integration
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy with rolling update
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          echo "$SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          ssh -i /tmp/deploy_key \
+            -o StrictHostKeyChecking=no \
+            ubuntu@$SERVER_IP \
+            'bash -s' << 'ENDSSH'
+            set -e
+            cd ~/hng14-stage2-devops
+
+            git pull origin main
+
+            # Rolling update — bring up new containers
+            docker compose pull 2>/dev/null || true
+            docker compose up -d --build --no-deps api
+
+            # Wait for health check to pass before stopping old
+            echo "Waiting for API health check..."
+            for i in $(seq 1 12); do
+              if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                echo "Health check passed!"
+                exit 0
+              fi
+              echo "Attempt $i/12..."
+              sleep 5
+            done
+
+            echo "Health check failed - rolling back"
+            docker compose up -d --no-deps api
+            exit 1
+          ENDSSH
