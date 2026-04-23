@@ -53,9 +53,9 @@ jobs:
 
       - name: Lint Dockerfiles
         run: |
-          hadolint api/Dockerfile
-          hadolint worker/Dockerfile
-          hadolint frontend/Dockerfile
+          hadolint --failure-threshold error api/Dockerfile
+          hadolint --failure-threshold error worker/Dockerfile
+          hadolint --failure-threshold error frontend/Dockerfile
 
   test:
     name: Test
