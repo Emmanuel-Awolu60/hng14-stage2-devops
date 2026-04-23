@@ -1,27 +1,21 @@
-# Build stage
-FROM python:3.11-slim AS builder
+FROM python:3.11-alpine AS builder
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
+RUN pip install --upgrade pip --no-cache-dir && \
     pip install --no-cache-dir --user -r requirements.txt
 
-# Final stage
-FROM python:3.11-slim
+FROM python:3.11-alpine
 
 WORKDIR /app
 
-# Create non-root user
-RUN useradd -m -u 1001 appuser
+RUN adduser -D -u 1001 appuser
 
-# Copy installed packages from builder
 COPY --from=builder /root/.local /home/appuser/.local
 
-# Copy application code
 COPY worker.py .
 
-# Set ownership
 RUN chown -R appuser:appuser /app
 
 USER appuser

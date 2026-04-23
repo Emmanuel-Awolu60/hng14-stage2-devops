@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.11-alpine AS builder
 
 WORKDIR /app
 
@@ -6,11 +6,11 @@ COPY requirements.txt .
 RUN pip install --upgrade pip --no-cache-dir && \
     pip install --no-cache-dir --user -r requirements.txt
 
-FROM python:3.11-slim
+FROM python:3.11-alpine
 
 WORKDIR /app
 
-RUN useradd -m -u 1001 appuser
+RUN adduser -D -u 1001 appuser
 
 COPY --from=builder /root/.local /home/appuser/.local
 
