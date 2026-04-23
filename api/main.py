@@ -13,9 +13,11 @@ r = redis.Redis(
     decode_responses=True
 )
 
+
 @app.get("/")
 def root():
     return JSONResponse({"message": "API is running"})
+
 
 @app.get("/health")
 def health():
@@ -25,12 +27,14 @@ def health():
     except Exception:
         return JSONResponse({"message": "unhealthy"}, status_code=503)
 
+
 @app.post("/jobs")
 def create_job():
     job_id = str(uuid.uuid4())
     r.lpush("jobs", job_id)
     r.hset(f"job:{job_id}", "status", "queued")
     return {"job_id": job_id}
+
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
