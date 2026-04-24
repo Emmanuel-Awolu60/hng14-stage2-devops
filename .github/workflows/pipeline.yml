@@ -33,7 +33,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "18"
 
       - name: Install ESLint
         run: |
@@ -270,6 +270,7 @@ jobs:
       - name: Deploy with rolling update
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
           SERVER_IP: ${{ secrets.SERVER_IP }}
         run: |
           echo "$SSH_KEY" > /tmp/deploy_key
